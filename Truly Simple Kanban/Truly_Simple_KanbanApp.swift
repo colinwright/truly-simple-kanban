@@ -1,20 +1,14 @@
-//
-//  Truly_Simple_KanbanApp.swift
-//  Truly Simple Kanban
-//
-//  Created by Colin Wright on 6/4/25.
-//
-
+// TrulySimpleKanbanApp.swift
 import SwiftUI
 
 @main
-struct Truly_Simple_KanbanApp: App {
-    let persistenceController = PersistenceController.shared
+struct TrulySimpleKanbanApp: App {
+    // let persistenceController = PersistenceController.shared // REMOVE if not used
 
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .environment(\.managedObjectContext, persistenceController.container.viewContext)
+                // .environment(\.managedObjectContext, persistenceController.container.viewContext) // REMOVE
         }
     }
 }
