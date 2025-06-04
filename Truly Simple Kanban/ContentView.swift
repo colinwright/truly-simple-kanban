@@ -15,8 +15,9 @@ struct KanbanBoardView: View {
     @Binding var showingAddTaskSheet: Bool
     @Binding var taskToEdit: Task?
 
-    @Binding var draggedTaskID: UUID?
+    @Binding var activeDragID: UUID?
     @Binding var dropTargetInfo: DropTargetInfo?
+    @Binding var recentlyDroppedTaskID: UUID?
 
     let filteredTasksClosure: (TaskStatus) -> [Task]
     let deleteTaskClosure: (Task) -> Void
@@ -32,8 +33,9 @@ struct KanbanBoardView: View {
                     KanbanColumnView(
                         status: status,
                         tasks: filteredTasksClosure(status),
-                        draggedTaskID: $draggedTaskID,
+                        activeDragID: $activeDragID,
                         dropTargetInfo: $dropTargetInfo,
+                        recentlyDroppedTaskID: $recentlyDroppedTaskID,
                         onEditTask: { task in self.taskToEdit = task },
                         onDeleteTask: deleteTaskClosure,
                         handleDrop: handleDropClosure
@@ -68,7 +70,7 @@ struct KanbanBoardView: View {
             )
         }
         .onChange(of: tasks) { newTasks in saveTasksClosure(newTasks) }
-        .onChange(of: draggedTaskID) { newValue in
+        .onChange(of: activeDragID) { newValue in
             if newValue == nil {
                 if dropTargetInfo != nil {
                     dropTargetInfo = nil
@@ -84,8 +86,9 @@ struct ContentView: View {
     @State private var showingAddTaskSheet = false
     @State private var taskToEdit: Task?
 
-    @State private var draggedTaskID: UUID? = nil
+    @State private var activeDragID: UUID? = nil
     @State private var dropTargetInfo: DropTargetInfo? = nil
+    @State private var recentlyDroppedTaskID: UUID? = nil
 
     init() {
         let appearance = UINavigationBarAppearance()
@@ -105,8 +108,9 @@ struct ContentView: View {
                 tasks: $tasks,
                 showingAddTaskSheet: $showingAddTaskSheet,
                 taskToEdit: $taskToEdit,
-                draggedTaskID: $draggedTaskID,
+                activeDragID: $activeDragID,
                 dropTargetInfo: $dropTargetInfo,
+                recentlyDroppedTaskID: $recentlyDroppedTaskID,
                 filteredTasksClosure: self.filteredTasks,
                 deleteTaskClosure: self.deleteTask,
                 saveTasksClosure: PersistenceService.shared.saveTasks,
@@ -197,14 +201,15 @@ struct ContentView: View {
 struct KanbanColumnView: View {
     let status: TaskStatus
     let tasks: [Task]
-    @Binding var draggedTaskID: UUID?
+    @Binding var activeDragID: UUID?
     @Binding var dropTargetInfo: DropTargetInfo?
+    @Binding var recentlyDroppedTaskID: UUID?
     var onEditTask: (Task) -> Void
     var onDeleteTask: (Task) -> Void
     let handleDrop: (_ sourceTaskID: UUID, _ targetColumn: TaskStatus, _ insertBeforeTaskID: UUID?) -> Void
 
     var body: some View {
-        let isColumnHighlightedForEndDrop = dropTargetInfo?.columnStatus == status && dropTargetInfo?.taskID == nil && draggedTaskID != nil
+        let isColumnHighlightedForEndDrop = dropTargetInfo?.columnStatus == status && dropTargetInfo?.taskID == nil && activeDragID != nil
         
         VStack(alignment: .leading, spacing: 12) {
             Text(status.rawValue.uppercased()).font(.system(size: 14, weight: .semibold, design: .rounded)).kerning(0.5).padding([.horizontal, .bottom], 8).foregroundColor(status.accentColor)
@@ -215,40 +220,54 @@ struct KanbanColumnView: View {
                             TaskSlotView(
                                 task: task,
                                 columnStatus: status,
-                                draggedTaskID: $draggedTaskID,
+                                activeDragID: $activeDragID,
                                 dropTargetInfo: $dropTargetInfo,
+                                recentlyDroppedTaskID: $recentlyDroppedTaskID,
                                 onEditTask: onEditTask,
                                 onDeleteTask: onDeleteTask,
                                 handleDrop: handleDrop
                             )
                             .id(task.id)
                         }
-                        // Styled End of Column Drop Target Area
                         EndColumnDropArea(status: status, isTargeted: isColumnHighlightedForEndDrop, tasksInColumn: tasks.count)
                             .dropDestination(for: String.self) { items, location in
-                                guard let currentDraggedTaskID = self.draggedTaskID,
+                                guard let currentDraggedTaskID = self.activeDragID,
                                       currentDraggedTaskID.uuidString == items.first else {
+                                    NSLog("[EndColumnDropArea] Drop rejected: No active drag or item mismatch.")
                                     return false
                                 }
-                                if let dti = dropTargetInfo, dti.columnStatus == self.status, dti.taskID != nil {
-                                     NSLog("[EndColumnDropArea '%@'] REJECT: Task slot target is active in this column.", self.status.rawValue)
-                                     return false
-                                }
+                                // Redundant check for taskID != nil as EndColumnDropArea should only be targeted if taskID is nil for this column
+                                // if let dti = dropTargetInfo, dti.columnStatus == self.status, dti.taskID != nil {
+                                //      NSLog("[EndColumnDropArea '%@'] REJECT: Task slot target is active in this column.", self.status.rawValue)
+                                //      return false
+                                // }
                                 
                                 NSLog("[EndColumnDropArea '%@'] ACTION: Dropping ID '%@'", self.status.rawValue, currentDraggedTaskID.uuidString)
-                                handleDrop(currentDraggedTaskID, self.status, nil)
                                 
-                                self.draggedTaskID = nil
-                                self.dropTargetInfo = nil
+                                let droppedID = currentDraggedTaskID
+                                self.activeDragID = nil
+                                self.recentlyDroppedTaskID = droppedID
+
+                                handleDrop(droppedID, self.status, nil)
+                                
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                                    if self.recentlyDroppedTaskID == droppedID {
+                                        NSLog("[EndColumnDropArea Fallback] Clearing recentlyDroppedTaskID: %@", droppedID.uuidString)
+                                        self.recentlyDroppedTaskID = nil
+                                    }
+                                }
                                 return true
                             } isTargeted: { isTargetedValue in
-                                if isTargetedValue && draggedTaskID != nil {
-                                    if dropTargetInfo == nil || (dropTargetInfo?.columnStatus == status && dropTargetInfo?.taskID == nil) || dropTargetInfo?.columnStatus != status {
-                                        self.dropTargetInfo = DropTargetInfo(taskID: nil, columnStatus: self.status)
+                                let currentTargetForThisZone = DropTargetInfo(taskID: nil, columnStatus: self.status)
+                                if isTargetedValue && self.activeDragID != nil {
+                                    if self.dropTargetInfo != currentTargetForThisZone {
+                                        self.dropTargetInfo = currentTargetForThisZone
+                                        // NSLog("[EndColumnDropArea '%@'] isTargeted: SET dropTargetInfo", self.status.rawValue)
                                     }
                                 } else {
-                                    if dropTargetInfo == DropTargetInfo(taskID: nil, columnStatus: self.status) {
+                                    if self.dropTargetInfo == currentTargetForThisZone {
                                         self.dropTargetInfo = nil
+                                        // NSLog("[EndColumnDropArea '%@'] isTargeted: CLEARED dropTargetInfo", self.status.rawValue)
                                     }
                                 }
                             }
@@ -259,7 +278,6 @@ struct KanbanColumnView: View {
         }
         .padding(12).frame(width: 300, height: 650).background(Color.columnBackground).cornerRadius(12)
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.subtleBorder, lineWidth: 0.75))
-        // General column overlay removed, specific highlight is on EndColumnDropArea
     }
 }
 
@@ -279,15 +297,15 @@ struct EndColumnDropArea: View {
                 .foregroundColor(isTargeted ? Color.accentColor : Color.secondaryText.opacity(0.7))
         }
         .frame(maxWidth: .infinity)
-        .frame(minHeight: tasksInColumn == 0 ? 300 : 80, idealHeight: 100) // Min height like a card, ideal a bit more
-        .background(isTargeted ? Color.accentColor.opacity(0.15) : Color.columnBackground) // Use column bg normally
+        .frame(minHeight: tasksInColumn == 0 ? 300 : 80, idealHeight: 100)
+        .background(isTargeted ? Color.accentColor.opacity(0.15) : Color.columnBackground)
         .cornerRadius(10)
         .overlay(
             RoundedRectangle(cornerRadius: 10)
                 .stroke(isTargeted ? Color.accentColor : Color.subtleBorder.opacity(0.5),
                         style: StrokeStyle(lineWidth: isTargeted ? 1.5 : 1, dash: [isTargeted ? 0 : 4]))
         )
-        .padding(.top, tasksInColumn == 0 ? 0 : 8) // Add some top padding if there are tasks above it
+        .padding(.top, tasksInColumn == 0 ? 0 : 8)
     }
 }
 
@@ -296,15 +314,16 @@ struct EndColumnDropArea: View {
 struct TaskSlotView: View {
     let task: Task
     let columnStatus: TaskStatus
-    @Binding var draggedTaskID: UUID?
+    @Binding var activeDragID: UUID?
     @Binding var dropTargetInfo: DropTargetInfo?
+    @Binding var recentlyDroppedTaskID: UUID?
     var onEditTask: (Task) -> Void
     var onDeleteTask: (Task) -> Void
     let handleDrop: (_ sourceTaskID: UUID, _ targetColumn: TaskStatus, _ insertBeforeTaskID: UUID?) -> Void
 
     var body: some View {
-        let isBeingDragged = draggedTaskID == task.id
-        let showPlaceholder = dropTargetInfo?.taskID == task.id && dropTargetInfo?.columnStatus == columnStatus && draggedTaskID != nil && draggedTaskID != task.id
+        let isBeingDragged = activeDragID == task.id
+        let showPlaceholder = dropTargetInfo?.taskID == task.id && dropTargetInfo?.columnStatus == columnStatus && activeDragID != nil && activeDragID != task.id
         
         VStack(spacing: 0) {
             if showPlaceholder {
@@ -316,29 +335,68 @@ struct TaskSlotView: View {
         .padding(.vertical, 4)
         .contentShape(Rectangle())
         .onDrag {
-            NSLog("[TaskSlot '%@'] onDrag: STARTED", task.title)
-            self.draggedTaskID = task.id
+            NSLog("[TaskSlot '%@'] onDrag: CALLED. Active: %@, RecentlyDropped: %@",
+                  task.title, self.activeDragID?.uuidString ?? "nil", self.recentlyDroppedTaskID?.uuidString ?? "nil")
+
+            if self.recentlyDroppedTaskID == task.id {
+                NSLog("[TaskSlot '%@'] onDrag: BLOCKED (recently dropped cooldown).", task.title)
+                return NSItemProvider()
+            }
+
+            if self.activeDragID != nil && self.activeDragID != task.id {
+                NSLog("[TaskSlot '%@'] onDrag: BLOCKED (another task %@ is active).", task.title, self.activeDragID!.uuidString)
+                return NSItemProvider()
+            }
+
+            if self.activeDragID == nil {
+                NSLog("[TaskSlot '%@'] onDrag: INITIATING DRAG.", task.title)
+                if self.recentlyDroppedTaskID != nil {
+                     NSLog("[TaskSlot '%@'] onDrag: Clearing stale recentlyDroppedTaskID (%@).", task.title, self.recentlyDroppedTaskID!.uuidString)
+                    self.recentlyDroppedTaskID = nil
+                }
+                self.activeDragID = task.id
+            } else {
+                NSLog("[TaskSlot '%@'] onDrag: CONTINUING DRAG.", task.title)
+            }
             return NSItemProvider(object: task.id.uuidString as NSString)
         }
         .dropDestination(for: String.self) { items, location in
-            guard let currentDraggedTaskID = self.draggedTaskID,
+            guard let currentDraggedTaskID = self.activeDragID,
                   currentDraggedTaskID.uuidString == items.first else {
+                NSLog("[TaskSlotDrop] Drop rejected: No active drag or item mismatch.")
                 return false
             }
-            guard currentDraggedTaskID != task.id else { return false }
+            guard currentDraggedTaskID != task.id else {
+                NSLog("[TaskSlotDrop] Drop rejected: Cannot drop task on itself.")
+                return false
+            }
             
             NSLog("[TaskSlotDrop '%@'] ACTION: Dropping ID '%@' before this task.", task.title, currentDraggedTaskID.uuidString)
-            handleDrop(currentDraggedTaskID, self.columnStatus, self.task.id)
             
-            self.draggedTaskID = nil
-            self.dropTargetInfo = nil
+            let droppedID = currentDraggedTaskID
+            self.activeDragID = nil
+            self.recentlyDroppedTaskID = droppedID
+
+            handleDrop(droppedID, self.columnStatus, self.task.id)
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                if self.recentlyDroppedTaskID == droppedID {
+                    NSLog("[TaskSlotDrop Fallback] Clearing recentlyDroppedTaskID: %@", droppedID.uuidString)
+                    self.recentlyDroppedTaskID = nil
+                }
+            }
             return true
-        } isTargeted: { isTargeted in
-            if isTargeted && draggedTaskID != nil && draggedTaskID != task.id {
-                self.dropTargetInfo = DropTargetInfo(taskID: task.id, columnStatus: self.columnStatus)
+        } isTargeted: { isTargetedValue in
+            let currentTargetForThisZone = DropTargetInfo(taskID: task.id, columnStatus: self.columnStatus)
+            if isTargetedValue && self.activeDragID != nil && self.activeDragID != task.id {
+                if self.dropTargetInfo != currentTargetForThisZone {
+                     self.dropTargetInfo = currentTargetForThisZone
+                    // NSLog("[TaskSlotView '%@'] isTargeted: SET dropTargetInfo", task.title)
+                }
             } else {
-                if dropTargetInfo == DropTargetInfo(taskID: task.id, columnStatus: self.columnStatus) {
+                if self.dropTargetInfo == currentTargetForThisZone {
                     self.dropTargetInfo = nil
+                    // NSLog("[TaskSlotView '%@'] isTargeted: CLEARED dropTargetInfo", task.title)
                 }
             }
         }
