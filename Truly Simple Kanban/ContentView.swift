@@ -1,19 +1,7 @@
 // ContentView.swift
 import UniformTypeIdentifiers
 import SwiftUI
-
-// Custom ViewModifier for conditional toolbar background
-struct ToolbarBackgroundModifier: ViewModifier {
-    func body(content: Content) -> some View {
-        if #available(iOS 16.0, macOS 13.0, *) {
-            content
-                .toolbarBackground(Color.appBackground, for: .navigationBar)
-                .toolbarBackground(.visible, for: .navigationBar)
-        } else {
-            content
-        }
-    }
-}
+import os
 
 // Encapsulates the main board UI and its modifiers.
 struct KanbanBoardView: View {
@@ -50,7 +38,7 @@ struct KanbanBoardView: View {
     }
 
     @ToolbarContentBuilder
-    private var navigationToolbar: some ToolbarContent {
+    private var navigationToolbarContent: some ToolbarContent {
         ToolbarItem(placement: .navigationBarTrailing) {
             Button { showingAddTaskSheet = true } label: {
                 Image(systemName: "plus.circle.fill").font(.title2).foregroundColor(Color.primaryText)
@@ -60,12 +48,13 @@ struct KanbanBoardView: View {
              Text("Truly Simple Kanban").font(.system(size: 12, weight: .medium)).foregroundColor(Color.secondaryText)
          }
     }
-
+    
     var body: some View {
         kanbanBoardContent
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { navigationToolbar }
-            .modifier(ToolbarBackgroundModifier())
+            .toolbar { navigationToolbarContent }
+            .toolbarBackground(Color.appBackground, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
             .sheet(isPresented: $showingAddTaskSheet) {
                 AddTaskView { title, description in
                     self.appendNewTaskClosure(title, description)
@@ -86,8 +75,17 @@ struct KanbanBoardView: View {
                     }
                 )
             }
-            .onChange(of: tasks) { oldValue, newValue in self.saveTasksClosure(newValue) }
-            .onChange(of: draggedTask) { oldValue, newValue in if newValue == nil { intraColumnDropPlaceholderId = nil } }
+            .onChange(of: tasks) { newTasksValue in
+                self.saveTasksClosure(newTasksValue)
+            }
+            .onChange(of: draggedTask) { newDraggedTaskValue in
+                if newDraggedTaskValue == nil {
+                    NSLog("[KanbanBoardView] Drag ended. Clearing intraColumnDropPlaceholderId.")
+                    intraColumnDropPlaceholderId = nil
+                } else {
+                    NSLog("[KanbanBoardView] Drag started with task: %@", newDraggedTaskValue!.title)
+                }
+            }
     }
 }
 
@@ -104,9 +102,11 @@ struct ContentView: View {
         let appearance = UINavigationBarAppearance()
         appearance.configureWithOpaqueBackground()
         appearance.backgroundColor = UIColor(Color.appBackground)
+        
         let titleFont = UIFont.systemFont(ofSize: 12, weight: .medium)
         appearance.titleTextAttributes = [.foregroundColor: UIColor(Color.secondaryText), .font: titleFont]
         appearance.shadowColor = .clear
+        
         UINavigationBar.appearance().standardAppearance = appearance
         UINavigationBar.appearance().scrollEdgeAppearance = appearance
         UINavigationBar.appearance().compactAppearance = appearance
@@ -188,11 +188,13 @@ struct KanbanColumnView: View {
     let status: TaskStatus
     let tasks: [Task]
     @Binding var allTasks: [Task]
-    @Binding var draggedTask: Task?
+    @Binding var draggedTask: Task? // This is the @State from ContentView, passed as @Binding
     @Binding var dropPlaceholderId: UUID?
     var onEditTask: (Task) -> Void
     var onDeleteTask: (Task) -> Void
-    @StateObject private var columnDropDelegate: DropTaskDelegate
+
+    @State private var isColumnTargetedForEndDrop: Bool = false
+    @State private var endDropTargetDebounceTimer: Timer?
 
     init(
         status: TaskStatus,
@@ -210,64 +212,183 @@ struct KanbanColumnView: View {
         self._dropPlaceholderId = dropPlaceholderId
         self.onEditTask = onEditTask
         self.onDeleteTask = onDeleteTask
-        self._columnDropDelegate = StateObject(wrappedValue: DropTaskDelegate(columnStatus: status, tasks: allTasks, draggedTask: draggedTask))
     }
     
     @ViewBuilder
-    private func taskRowView(_ task: Task) -> some View {
-        if dropPlaceholderId == task.id,
-           let currentDraggedTask = draggedTask,
-           currentDraggedTask.id != task.id,
-           currentDraggedTask.status == self.status {
-            DropPlaceholderView()
-        }
-        TaskCardView(task: task, onTap: { onEditTask(task) })
-            .padding(.vertical, 6)
-            .onDrag {
-                self.draggedTask = task
-                return NSItemProvider(object: task.id.uuidString as NSString)
+    private func taskSlotView(_ task: Task) -> some View {
+        VStack(spacing: 0) {
+            if dropPlaceholderId == task.id && self.draggedTask != nil && self.draggedTask!.id != task.id {
+                DropPlaceholderView().padding(.bottom, 4)
             }
-            .onDrop(of: [UTType.plainText],
-                    delegate: DropTaskOnTaskDelegate(
-                        targetTask: task,
-                        tasks: $allTasks,
-                        draggedTask: $draggedTask,
-                        dropPlaceholderId: $dropPlaceholderId,
-                        currentColumnStatus: self.status
-                    )
-            )
-            .contextMenu {
-                Button(role: .destructive) { onDeleteTask(task) } label: {
-                    Label("Delete Task", systemImage: "trash")
+            // Pass isBeingDragged state to TaskCardView
+            TaskCardView(task: task, onTap: { onEditTask(task) }, isBeingDragged: self.draggedTask?.id == task.id)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .onDrag {
+            NSLog("[TaskSlot %@] onDrag started for task: %@", status.rawValue, task.title)
+            self.draggedTask = task
+            return NSItemProvider(object: task.id.uuidString as NSString)
+        }
+        .dropDestination(for: String.self) { receivedItems, location in
+            guard let currentDraggedTask = self.draggedTask, currentDraggedTask.id.uuidString == receivedItems.first else { return false }
+            guard currentDraggedTask.id != task.id else { return false }
+            NSLog("[TaskSlotDrop ACTION] Dropped task %@ to insert before %@", currentDraggedTask.title, task.title)
+            if let draggedIndex = allTasks.firstIndex(where: { $0.id == currentDraggedTask.id }) {
+                var mutableDraggedTask = allTasks.remove(at: draggedIndex); let oldStatus = mutableDraggedTask.status
+                mutableDraggedTask.status = self.status; mutableDraggedTask.orderIndex = task.orderIndex - 0.5
+                if let targetIndexInAllTasks = allTasks.firstIndex(where: { $0.id == task.id }) {
+                    allTasks.insert(mutableDraggedTask, at: targetIndexInAllTasks)
+                } else { allTasks.append(mutableDraggedTask) }
+                let tcTasks = allTasks.filter{$0.status == self.status}.sorted{$0.orderIndex < $1.orderIndex}; for i in 0..<tcTasks.count { if let idx = allTasks.firstIndex(where:{$0.id == tcTasks[i].id}) {allTasks[idx].orderIndex = Double(i)}}
+                if oldStatus != self.status { let scTasks = allTasks.filter{$0.status == oldStatus}.sorted{$0.orderIndex < $1.orderIndex}; for i in 0..<scTasks.count {if let idx = allTasks.firstIndex(where:{$0.id == scTasks[i].id}) {allTasks[idx].orderIndex = Double(i)}}}
+                
+                DispatchQueue.main.async {
+                    self.dropPlaceholderId = nil
+                    self.draggedTask = nil
+                }
+                return true
+            }
+            return false
+        } isTargeted: { isTargetedOverSlot in
+            if isTargetedOverSlot && self.draggedTask != nil && self.draggedTask!.id != task.id { // Use self.draggedTask
+                if dropPlaceholderId != task.id {
+                    NSLog("[TaskSlot Target SET] Slot for task: %@, Placeholder: %@", task.title, task.id.uuidString)
+                    dropPlaceholderId = task.id
+                }
+                if isColumnTargetedForEndDrop {
+                    NSLog("[TaskSlot Target SET] Task slot for %@ targeted, ensuring isColumnTargetedForEndDrop is false.", task.title)
+                    self.endDropTargetDebounceTimer?.invalidate()
+                    isColumnTargetedForEndDrop = false
+                }
+            } else {
+                if dropPlaceholderId == task.id {
+                    NSLog("[TaskSlot Target CLEAR] Slot for task: %@, Placeholder was: %@", task.title, task.id.uuidString)
+                    dropPlaceholderId = nil
                 }
             }
+        }
+        .contextMenu { Button(role: .destructive) { onDeleteTask(task) } label: { Label("Delete Task", systemImage: "trash") } }
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let showColumnOverlay = isColumnTargetedForEndDrop && dropPlaceholderId == nil
+        
+        return VStack(alignment: .leading, spacing: 12) {
             Text(status.rawValue.uppercased())
-                .font(.system(size: 14, weight: .semibold, design: .rounded))
-                .kerning(0.5)
-                .padding(.horizontal, 8)
-                .padding(.bottom, 8)
-                .foregroundColor(status.accentColor)
-
+                .font(.system(size: 14, weight: .semibold, design: .rounded)).kerning(0.5).padding(.horizontal, 8).padding(.bottom, 8).foregroundColor(status.accentColor)
             ScrollView(showsIndicators: false) {
-                VStack(spacing: 0) {
+                VStack(alignment: .center, spacing: 0) {
                     ForEach(tasks) { task in
-                        taskRowView(task)
+                        taskSlotView(task)
                     }
-                    Spacer().frame(minHeight: 10)
+                    Rectangle()
+                        .fill(Color.clear)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: tasks.isEmpty ? 400 : 100) // Adjusted height
+                        .contentShape(Rectangle())
+                        .dropDestination(for: String.self) { receivedItems, location in
+                            NSLog("[EndColumnDrop] ACTION closure entered. Current dropPlaceholderId: %@", self.dropPlaceholderId?.uuidString ?? "nil")
+                            if self.dropPlaceholderId != nil {
+                                NSLog("[EndColumnDrop ACTION] Yielding because dropPlaceholderId is unexpectedly SET: %@", self.dropPlaceholderId?.uuidString ?? "nil")
+                                return false
+                            }
+                            guard let currentDraggedTask = self.draggedTask, currentDraggedTask.id.uuidString == receivedItems.first else {
+                                NSLog("[EndColumnDrop ACTION] Guard failed: No dragged task or ID mismatch.")
+                                return false
+                            }
+                            NSLog("[EndColumnDrop ACTION] Processing drop of task %@ at end of column %@", currentDraggedTask.title, self.status.rawValue)
+                            if let draggedIndex = allTasks.firstIndex(where: { $0.id == currentDraggedTask.id }) {
+                                var itemToMove = allTasks[draggedIndex]; let originalStatus = itemToMove.status
+                                if originalStatus == self.status { allTasks.remove(at: draggedIndex) }
+                                itemToMove.status = self.status
+                                let otherTasksInColumn = allTasks.filter { $0.status == self.status && $0.id != currentDraggedTask.id }
+                                itemToMove.orderIndex = (otherTasksInColumn.map { $0.orderIndex }.max() ?? -1.0) + 1.0
+                                if let existingIndex = allTasks.firstIndex(where: { $0.id == itemToMove.id}) { allTasks[existingIndex] = itemToMove } else { allTasks.append(itemToMove) }
+                                let tcTasks = allTasks.filter{$0.status == self.status}.sorted{$0.orderIndex < $1.orderIndex}; for i in 0..<tcTasks.count { if let idx = allTasks.firstIndex(where:{$0.id == tcTasks[i].id}) {allTasks[idx].orderIndex = Double(i)}}
+                                if originalStatus != self.status { let scTasks = allTasks.filter{$0.status == originalStatus}.sorted{$0.orderIndex < $1.orderIndex}; for i in 0..<scTasks.count {if let idx = allTasks.firstIndex(where:{$0.id == scTasks[i].id}) {allTasks[idx].orderIndex = Double(i)}}}
+                                
+                                DispatchQueue.main.async {
+                                    self.dropPlaceholderId = nil
+                                    self.draggedTask = nil
+                                }
+                                return true
+                            }
+                            NSLog("[EndColumnDrop ACTION] Failed to find dragged task in allTasks.")
+                            return false
+                        } isTargeted: { isOverEndSpacer in
+                            // MODIFIED: Debounced logic for end spacer targeting
+                            self.endDropTargetDebounceTimer?.invalidate()
+
+                            if isOverEndSpacer && self.draggedTask != nil { // Use self.draggedTask
+                                if self.dropPlaceholderId != nil {
+                                    NSLog("[EndColumnSpacer Hover] Clearing task placeholder (was %@). End spacer is primary.", self.dropPlaceholderId!.uuidString)
+                                    self.dropPlaceholderId = nil
+                                }
+                                
+                                self.endDropTargetDebounceTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { _ in // Increased debounce interval
+                                    if self.draggedTask != nil && self.dropPlaceholderId == nil {
+                                        if !self.isColumnTargetedForEndDrop {
+                                            NSLog("[EndColumnSpacer DEBOUNCED] Setting isColumnTargetedForEndDrop = true (Highlight ON)")
+                                            self.isColumnTargetedForEndDrop = true
+                                        }
+                                    } else {
+                                        if self.isColumnTargetedForEndDrop {
+                                             NSLog("[EndColumnSpacer DEBOUNCED] Conditions NO LONGER MET (placeholderId: %@), setting isColumnTargetedForEndDrop = false", self.dropPlaceholderId?.uuidString ?? "nil")
+                                            self.isColumnTargetedForEndDrop = false
+                                        }
+                                    }
+                                }
+                            } else {
+                                if self.isColumnTargetedForEndDrop {
+                                    NSLog("[EndColumnSpacer Hover Exit] Setting isColumnTargetedForEndDrop = false (Highlight OFF)")
+                                    self.isColumnTargetedForEndDrop = false
+                                }
+                            }
+                        }
                 }
             }
         }
-        .padding(12)
-        .frame(width: 300, height: 650)
-        .background(Color.columnBackground)
-        .cornerRadius(12)
+        .padding(12).frame(width: 300, height: 650).background(Color.columnBackground).cornerRadius(12)
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.subtleBorder, lineWidth: 0.75))
-        .overlay(columnDropDelegate.columnTargetFeedback())
-        .onDrop(of: [UTType.plainText], delegate: columnDropDelegate)
+        .overlay(Group { if showColumnOverlay { RoundedRectangle(cornerRadius: 12).fill(Color.accentColor.opacity(0.1)) } })
+    }
+}
+
+struct TaskCardView: View {
+    let task: Task
+    var onTap: (() -> Void)? = nil
+    var isBeingDragged: Bool // New parameter
+
+    var body: some View {
+        ZStack {
+            Color.clear
+            VStack(alignment: .leading, spacing: 5) {
+                Text(task.title)
+                    .font(.system(size: 15, weight: .medium, design: .rounded))
+                    .foregroundColor(Color.primaryText)
+                    .lineLimit(3)
+                if let description = task.description, !description.isEmpty {
+                    Text(description)
+                        .font(.system(size: 13, design: .rounded))
+                        .foregroundColor(Color.secondaryText)
+                        .lineLimit(2)
+                        .padding(.top, 2)
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.cardBackground)
+            .cornerRadius(10)
+            .overlay(
+                 RoundedRectangle(cornerRadius: 10)
+                     .stroke(Color.subtleBorder.opacity(0.6), lineWidth: 0.75)
+            )
+        }
+        .contentShape(Rectangle())
+        .opacity(isBeingDragged ? 0.2 : 1.0) // Apply opacity here
+        .onTapGesture { onTap?() }
     }
 }
 
@@ -281,38 +402,6 @@ struct DropPlaceholderView: View {
             .cornerRadius(1.25)
     }
 }
-
-struct TaskCardView: View {
-    let task: Task
-    var onTap: (() -> Void)? = nil
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(task.title)
-                .font(.system(size: 15, weight: .medium, design: .rounded))
-                .foregroundColor(Color.primaryText)
-                .lineLimit(3)
-            if let description = task.description, !description.isEmpty {
-                Text(description)
-                    .font(.system(size: 13, design: .rounded))
-                    .foregroundColor(Color.secondaryText)
-                    .lineLimit(2)
-                    .padding(.top, 2)
-            }
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.cardBackground)
-        .cornerRadius(10)
-        .overlay(
-             RoundedRectangle(cornerRadius: 10)
-                 .stroke(Color.subtleBorder.opacity(0.6), lineWidth: 0.75)
-        )
-        .contentShape(Rectangle())
-        .onTapGesture { onTap?() }
-    }
-}
-
 struct AddTaskView: View {
     @Environment(\.dismiss) var dismiss
     @State private var title: String = ""
@@ -351,175 +440,7 @@ struct AddTaskView: View {
     }
 }
 
-// MARK: - Drop Delegates (Defined at File Scope)
-class DropTaskDelegate: ObservableObject, DropDelegate {
-    let columnStatus: TaskStatus
-    @Binding var tasks: [Task]
-    @Binding var draggedTask: Task?
-    @Published var isTargeted: Bool = false
-
-    init(columnStatus: TaskStatus, tasks: Binding<[Task]>, draggedTask: Binding<Task?>) {
-        self.columnStatus = columnStatus
-        self._tasks = tasks
-        self._draggedTask = draggedTask
-    }
-
-    func performDrop(info: DropInfo) -> Bool {
-        DispatchQueue.main.async { self.isTargeted = false }
-        guard let dragged = self.draggedTask,
-              let sourceTaskIndexInAllTasks = tasks.firstIndex(where: { $0.id == dragged.id })
-        else {
-            DispatchQueue.main.async { self.draggedTask = nil }
-            return false
-        }
-
-        var mutableTasks = tasks
-
-        let previousStatus = mutableTasks[sourceTaskIndexInAllTasks].status
-
-        if previousStatus != columnStatus {
-            mutableTasks[sourceTaskIndexInAllTasks].status = columnStatus
-        }
-        
-        let otherTasksInTargetColumn = mutableTasks.filter { $0.status == columnStatus && $0.id != dragged.id }
-        let maxOrderIndexInTargetColumn = otherTasksInTargetColumn.map { $0.orderIndex }.max() ?? -1.0
-        mutableTasks[sourceTaskIndexInAllTasks].orderIndex = maxOrderIndexInTargetColumn + 1.0
-        
-        // FIXED: var to let
-        let finalTasksInTargetColumn = mutableTasks.filter { $0.status == columnStatus }.sorted { $0.orderIndex < $1.orderIndex }
-        for i in 0..<finalTasksInTargetColumn.count {
-            if let originalTaskIndex = mutableTasks.firstIndex(where: { $0.id == finalTasksInTargetColumn[i].id }) {
-                mutableTasks[originalTaskIndex].orderIndex = Double(i)
-            }
-        }
-        
-        if previousStatus != columnStatus {
-            // FIXED: var to let
-            let finalTasksInSourceColumn = mutableTasks.filter { $0.status == previousStatus }.sorted { $0.orderIndex < $1.orderIndex }
-            for i in 0..<finalTasksInSourceColumn.count {
-                if let originalTaskIndex = mutableTasks.firstIndex(where: { $0.id == finalTasksInSourceColumn[i].id }) {
-                    mutableTasks[originalTaskIndex].orderIndex = Double(i)
-                }
-            }
-        }
-        
-        self.tasks = mutableTasks
-        DispatchQueue.main.async { self.draggedTask = nil }
-        return true
-    }
-
-    func validateDrop(info: DropInfo) -> DropProposal? {
-        guard self.draggedTask != nil else { return nil }
-        return DropProposal(operation: .move)
-    }
-
-    func dropEntered(info: DropInfo) {
-        guard self.draggedTask != nil else { return }
-        DispatchQueue.main.async { self.isTargeted = true }
-    }
-
-    func dropExited(info: DropInfo) {
-        DispatchQueue.main.async { self.isTargeted = false }
-    }
-    
-    func columnTargetFeedback() -> some View {
-        if isTargeted {
-            return AnyView(RoundedRectangle(cornerRadius: 12).fill(Color.accentColor.opacity(0.1)))
-        }
-        return AnyView(EmptyView())
-    }
-}
-
-struct DropTaskOnTaskDelegate: DropDelegate {
-    let targetTask: Task
-    @Binding var tasks: [Task]
-    @Binding var draggedTask: Task?
-    @Binding var dropPlaceholderId: UUID?
-    let currentColumnStatus: TaskStatus
-
-    func performDrop(info: DropInfo) -> Bool {
-        self.dropPlaceholderId = nil
-        guard let dragged = self.draggedTask,
-              dragged.id != targetTask.id
-        else {
-            DispatchQueue.main.async { self.draggedTask = nil }
-            return false
-        }
-
-        var mutableTasks = tasks
-        guard let draggedTaskOriginalArrayIndex = mutableTasks.firstIndex(where: { $0.id == dragged.id })
-        else {
-            DispatchQueue.main.async { self.draggedTask = nil }
-            return false
-        }
-        
-        var itemToMove = mutableTasks.remove(at: draggedTaskOriginalArrayIndex)
-        let previousStatus = itemToMove.status
-        itemToMove.status = targetTask.status
-
-        let targetTaskArrayIndexInMutable = mutableTasks.firstIndex(where: { $0.id == targetTask.id })
-        
-        if let actualTargetIndex = targetTaskArrayIndexInMutable {
-            mutableTasks.insert(itemToMove, at: actualTargetIndex)
-        } else {
-            itemToMove.orderIndex = (mutableTasks.filter({$0.status == targetTask.status}).map({$0.orderIndex}).max() ?? -1.0) + 1.0
-            mutableTasks.append(itemToMove)
-        }
-        
-        let finalTargetColumnStatus = itemToMove.status
-        // FIXED: var to let
-        let tasksInFinalTargetColumn = mutableTasks.filter { $0.status == finalTargetColumnStatus }.sorted(by: { taskA, taskB in
-            if taskA.id == itemToMove.id && taskB.id == targetTask.id { return true }
-            if taskB.id == itemToMove.id && taskA.id == targetTask.id { return false }
-            return taskA.orderIndex < taskB.orderIndex
-        })
-
-        for i in 0..<tasksInFinalTargetColumn.count {
-            if let originalTaskIndex = mutableTasks.firstIndex(where: { $0.id == tasksInFinalTargetColumn[i].id }) {
-                mutableTasks[originalTaskIndex].orderIndex = Double(i)
-            }
-        }
-        
-        if previousStatus != finalTargetColumnStatus {
-            // FIXED: var to let
-            let tasksInSourceColumn = mutableTasks.filter { $0.status == previousStatus }.sorted { $0.orderIndex < $1.orderIndex }
-            for i in 0..<tasksInSourceColumn.count {
-                if let originalTaskIndex = mutableTasks.firstIndex(where: { $0.id == tasksInSourceColumn[i].id }) {
-                    mutableTasks[originalTaskIndex].orderIndex = Double(i)
-                }
-            }
-        }
-        
-        self.tasks = mutableTasks
-        DispatchQueue.main.async { self.draggedTask = nil }
-        return true
-    }
-
-    func validateDrop(info: DropInfo) -> DropProposal? {
-        guard let dragged = self.draggedTask,
-              dragged.id != targetTask.id
-        else { return nil }
-        return DropProposal(operation: .move)
-    }
-
-    func dropEntered(info: DropInfo) {
-        guard let dragged = self.draggedTask,
-              dragged.id != targetTask.id
-        else { return }
-        
-        if dragged.status == targetTask.status {
-            self.dropPlaceholderId = targetTask.id
-        } else {
-            self.dropPlaceholderId = nil
-        }
-    }
-
-    func dropExited(info: DropInfo) {
-        if self.dropPlaceholderId == targetTask.id {
-             self.dropPlaceholderId = nil
-        }
-    }
-}
+// REMOVED DropTaskDelegate and DropTaskOnTaskDelegate classes
 
 // MARK: - Preview (Defined at File Scope)
 struct ContentView_Previews: PreviewProvider {
