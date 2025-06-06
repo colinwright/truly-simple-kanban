@@ -1,7 +1,6 @@
 // ContentView.swift
 import UniformTypeIdentifiers
 import SwiftUI
-import os
 
 // Struct to describe a drop target for visual feedback
 struct DropTargetInfo: Equatable {
@@ -133,11 +132,9 @@ struct ContentView: View {
     private func deleteTask(_ taskToDelete: Task) {
         if activeDragID == taskToDelete.id {
             activeDragID = nil
-            NSLog("[DeleteTask] Cleared activeDragID for deleted task: %@", taskToDelete.id.uuidString)
         }
         if recentlyDroppedTaskID == taskToDelete.id {
             recentlyDroppedTaskID = nil
-            NSLog("[DeleteTask] Cleared recentlyDroppedTaskID for deleted task: %@", taskToDelete.id.uuidString)
         }
         
         let status = taskToDelete.status
@@ -167,7 +164,6 @@ struct ContentView: View {
     
     private func handleDropOperation(sourceTaskID: UUID, targetColumn: TaskStatus, insertBeforeTaskID: UUID?) {
         guard let sourceTaskIndex = tasks.firstIndex(where: { $0.id == sourceTaskID }) else {
-            NSLog("Error: Source task for drop not found (ID: %@)", sourceTaskID.uuidString)
             activeDragID = nil
             return
         }
@@ -190,7 +186,6 @@ struct ContentView: View {
         }
         
         tasks.append(taskToMove)
-        NSLog("Moved task '%@' from %@ to %@. Target orderIndex (pre-reindex): %.2f", taskToMove.title, oldStatus.rawValue, targetColumn.rawValue, taskToMove.orderIndex)
 
         if oldStatus != targetColumn { reindexTasks(inColumn: oldStatus) }
         reindexTasks(inColumn: targetColumn)
@@ -207,7 +202,6 @@ struct ContentView: View {
                 }
             }
         }
-        NSLog("[Reindex] Column: %@ re-indexed. Task count: %d", status.rawValue, columnTasks.count)
     }
 }
 
@@ -252,11 +246,8 @@ struct KanbanColumnView: View {
                             guard let draggedItemIDString = items.first,
                                   let currentDraggedTaskID = UUID(uuidString: draggedItemIDString),
                                   self.activeDragID == currentDraggedTaskID else {
-                                NSLog("[EndColumnDropArea] Drop rejected: No active drag or item mismatch.")
                                 return false
                             }
-                            
-                            NSLog("[EndColumnDropArea '%@'] ACTION: Dropping ID '%@'", self.status.rawValue, currentDraggedTaskID.uuidString)
                             
                             let droppedID = currentDraggedTaskID
                             self.activeDragID = nil
@@ -312,8 +303,6 @@ struct EndColumnDropArea: View {
                 .foregroundColor(isTargeted ? Color.accentColor : Color.secondaryText.opacity(0.7))
         }
         .frame(maxWidth: .infinity)
-        // Removed idealHeight to prevent conflict with minHeight.
-        // Adjusted minHeight values slightly for balance.
         .frame(minHeight: tasksInColumn == 0 ? 180 : 70)
         .background(isTargeted ? Color.accentColor.opacity(0.15) : Color.clear)
         .cornerRadius(10)
@@ -323,7 +312,6 @@ struct EndColumnDropArea: View {
                         style: StrokeStyle(lineWidth: isTargeted ? 1.5 : 1, dash: [isTargeted ? 0 : 4]))
         )
         .padding(.top, tasksInColumn == 0 ? 0 : 8)
-        // Consistent bottom padding logic: add if empty, otherwise rely on parent spacing.
         .padding(.bottom, tasksInColumn == 0 ? 8 : 0)
         .contentShape(Rectangle())
     }
@@ -356,50 +344,41 @@ struct TaskSlotView: View {
         .contentShape(Rectangle())
         .onDrag {
             if self.recentlyDroppedTaskID == task.id {
-                NSLog("[TaskSlot '%@'] onDrag: BLOCKED (recently dropped cooldown).", task.title)
                 if self.activeDragID == task.id {
-                    NSLog("[TaskSlot '%@'] onDrag: Clearing stuck activeDragID as task is on cooldown.", task.title)
                     self.activeDragID = nil
                 }
                 return NSItemProvider()
             }
 
             if let currentActiveDrag = self.activeDragID, currentActiveDrag != task.id {
-                NSLog("[TaskSlot '%@'] onDrag: activeDragID (%@) belonged to a different task. Resetting it.", task.title, currentActiveDrag.uuidString)
                 self.activeDragID = nil
             }
             
             if self.activeDragID != task.id {
-                NSLog("[TaskSlot '%@'] onDrag: INITIATING DRAG. Setting activeDragID.", task.title)
                 self.activeDragID = task.id
-            } else {
-                NSLog("[TaskSlot '%@'] onDrag: CONTINUING DRAG.", task.title)
             }
 
             if let recentDrop = self.recentlyDroppedTaskID, recentDrop != task.id {
-                NSLog("[TaskSlot '%@'] onDrag: Clearing stale recentlyDroppedTaskID (%@) for other task.", task.title, recentDrop.uuidString)
                 self.recentlyDroppedTaskID = nil
             }
             
-            NSLog("[TaskSlot '%@'] onDrag: PROVIDING ITEM. Active: %@, RecentlyDropped: %@",
-                  task.title, self.activeDragID?.uuidString ?? "nil", self.recentlyDroppedTaskID?.uuidString ?? "nil")
             return NSItemProvider(object: task.id.uuidString as NSString)
+        } preview: {
+            TaskCardView(task: task, onTap: nil, isBeingDragged: false)
+                .frame(width: 276)
+                .shadow(color: Color.black.opacity(0.3), radius: 8, x: 0, y: 4)
         }
         .dropDestination(for: String.self) { items, location in
             guard let draggedItemIDString = items.first,
                   let currentDraggedTaskID = UUID(uuidString: draggedItemIDString),
                   self.activeDragID == currentDraggedTaskID else {
-                NSLog("[TaskSlotDrop] Drop rejected: No active drag or item mismatch.")
                 return false
             }
             guard currentDraggedTaskID != task.id else {
-                NSLog("[TaskSlotDrop] Drop rejected: Cannot drop task on itself.")
                 self.activeDragID = nil
                 self.dropTargetInfo = nil
                 return false
             }
-            
-            NSLog("[TaskSlotDrop '%@'] ACTION: Dropping ID '%@' before this task.", task.title, currentDraggedTaskID.uuidString)
             
             let droppedID = currentDraggedTaskID
             self.activeDragID = nil
