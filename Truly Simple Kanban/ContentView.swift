@@ -461,17 +461,6 @@ struct AddTaskView: View {
                         .lineLimit(3, reservesSpace: true)
                         .listRowBackground(Color.cardBackground)
                 }
-                Section {
-                    Button("Add Task") {
-                        if !title.isEmpty {
-                            onSave(title, description)
-                            dismiss()
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .listRowBackground(Color.columnBackground.opacity(0.8))
-                    .disabled(title.isEmpty)
-                }
             }
             .navigationTitle("New Task")
             .navigationBarTitleDisplayMode(.inline)

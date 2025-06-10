@@ -24,74 +24,65 @@ struct EditTaskView: View {
 
     @ToolbarContentBuilder
     private var viewToolbar: some ToolbarContent {
-        ToolbarItem(placement: .navigationBarLeading) { // Or .cancellationAction for standard iOS behavior
+        ToolbarItem(placement: .cancellationAction) {
             Button("Cancel") { dismiss() }
         }
-        // If you want a "Done" or "Save" button in the toolbar as well:
-        // ToolbarItem(placement: .confirmationAction) { // Or .navigationBarTrailing
-        //     Button("Done") {
-        //         if !editingTitle.isEmpty {
-        //             onSave(task.id, editingTitle, editingDescription, editingStatus)
-        //             dismiss()
-        //         }
-        //     }
-        //     .disabled(editingTitle.isEmpty)
-        // }
+        
+        ToolbarItem(placement: .confirmationAction) {
+            Button("Save") {
+                if !editingTitle.isEmpty {
+                    onSave(task.id, editingTitle, editingDescription, editingStatus)
+                    dismiss()
+                }
+            }
+            .disabled(editingTitle.isEmpty)
+        }
     }
 
     var body: some View {
-        // NavigationView has been removed from here
-        Form {
-            Section(header: Text("Task Details").foregroundColor(Color.secondaryText)) {
-                TextField("Task Title", text: $editingTitle)
+        // --- START OF CORRECTION ---
+        // A view presented in a sheet needs its own NavigationView
+        // to display a toolbar and navigation title.
+        NavigationView {
+            Form {
+                Section(header: Text("Task Details").foregroundColor(Color.secondaryText)) {
+                    TextField("Task Title", text: $editingTitle)
+                        .listRowBackground(Color.cardBackground)
+                    TextField("Description (Optional)", text: $editingDescription, axis: .vertical)
+                        .lineLimit(3...)
+                        .listRowBackground(Color.cardBackground)
+                    Picker("Status", selection: $editingStatus) {
+                        ForEach(TaskStatus.allCases) { status in
+                            Text(status.rawValue).tag(status)
+                        }
+                    }
                     .listRowBackground(Color.cardBackground)
-                TextField("Description (Optional)", text: $editingDescription, axis: .vertical)
-                    .lineLimit(3...)
-                    .listRowBackground(Color.cardBackground)
-                Picker("Status", selection: $editingStatus) {
-                    ForEach(TaskStatus.allCases) { status in
-                        Text(status.rawValue).tag(status)
+                }
+                
+                if onDelete != nil {
+                    Section {
+                        Button("Delete Task", role: .destructive) {
+                            onDelete?(task.id)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .listRowBackground(Color.columnBackground)
                     }
                 }
-                .listRowBackground(Color.cardBackground)
             }
-            
-            Section {
-                Button("Save Changes") {
-                    if !editingTitle.isEmpty {
-                        onSave(task.id, editingTitle, editingDescription, editingStatus)
-                        dismiss()
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .center)
-                .listRowBackground(Color.columnBackground)
-            }
-            
-            if onDelete != nil {
-                Section {
-                    Button("Delete Task", role: .destructive) {
-                        onDelete?(task.id)
-                        // ContentView handles taskToEdit = nil to dismiss after onDelete completes
-                        // If not handled by ContentView, you might want to dismiss here too,
-                        // but it's generally better if the presenter dismisses after the action.
-                    }
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .listRowBackground(Color.columnBackground)
-                }
-            }
+            .navigationTitle("Edit Task")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { viewToolbar }
+            .background(Color.appBackground.ignoresSafeArea())
+            .scrollContentBackground(.hidden)
         }
-        .navigationTitle("Edit Task") // Applies to the presenting NavigationView's bar
-        .toolbar { viewToolbar }      // Applies to the presenting NavigationView's bar
-        .background(Color.appBackground.ignoresSafeArea()) // Apply to Form or a wrapping view
-        .scrollContentBackground(.hidden) // iOS 16+
-        .accentColor(Color.primaryText) // Applies to interactive elements within this view
+        // --- END OF CORRECTION ---
+        .accentColor(Color.primaryText) // AccentColor can apply to the NavigationView
     }
 }
 
-// Optional Preview for EditTaskView
+// Optional Preview for EditTaskView (No change needed here)
 struct EditTaskView_Previews: PreviewProvider {
     static var previews: some View {
-        // To make the preview look right (with a nav bar), wrap it in a NavigationView here
         NavigationView {
             EditTaskView(
                 task: Task(id: UUID(), title: "Sample Edit Task", description: "This is a description for the task.", status: .inProgress, orderIndex: 0.0),
@@ -103,6 +94,6 @@ struct EditTaskView_Previews: PreviewProvider {
                 }
             )
         }
-        .preferredColorScheme(.light)
+        .preferredColorScheme(.dark)
     }
 }
